@@ -1,8 +1,6 @@
-modules = [
-  "nodejs-18.x",
-  "web",
-  "playwright"
-]
-
-[variables]
-PORT = "3001"
+{ pkgs }: {
+  deps = [
+    pkgs.nodejs-18_x
+    pkgs.chromium
+  ];
+}
