@@ -2,9 +2,16 @@
 
 Express.js + Playwright 音频解析服务
 
-## 🚀 部署到 Render
+## 🚀 部署到 Replit
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/oakvillechen/dreamlistenbar-backend)
+[![Run on Replit](https://replit.com/badge/github/oakvillechen/dreamlistenbar-backend)](https://replit.com/new/github/oakvillechen/dreamlistenbar-backend)
+
+### 部署步骤：
+1. 点击上方按钮
+2. 登录/注册 Replit 账号
+3. 等待安装完成（首次需要安装 Playwright）
+4. 点击 **"Run"** 启动服务
+5. 复制 Replit 提供的 URL（类似 `https://dreamlistenbar-backend.你的用户名.repl.co`）
 
 ## 📋 API 端点
 

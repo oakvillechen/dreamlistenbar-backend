@@ -1,0 +1,13 @@
+run = "npm start"
+compile = "npm install && npx playwright install chromium"
+
+[env]
+PORT = "3001"
+NODE_ENV = "production"
+
+[nix]
+channel = "stable-22_11"
+
+[[ports]]
+localPort = 3001
+externalPort = 80
