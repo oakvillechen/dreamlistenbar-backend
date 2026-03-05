@@ -3,12 +3,59 @@ import cors from 'cors';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { chromium } from 'playwright';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 
+// Serve local downloaded audio
+app.use('/local-audio', express.static(path.join(__dirname, '../downloads/')));
+
 // 我们使用单例 browser 提高响应速度
 let browser;
+
+function formatFilename(index, title) {
+  const safeTitle = title.replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
+  return `${safeTitle}.mp3`;
+}
+
+// 缓存章节信息，提高查找速度
+let xianniChaptersCache = null;
+
+function getLocalXianniAudio(tingId, hostHost) {
+  if (!xianniChaptersCache) {
+    try {
+      const urlsFile = path.join(__dirname, '../downloads/仙逆/audio-urls-from-1250.json');
+      if (fs.existsSync(urlsFile)) {
+        xianniChaptersCache = JSON.parse(fs.readFileSync(urlsFile, 'utf-8'));
+      }
+    } catch (e) {
+      return null;
+    }
+  }
+
+  if (xianniChaptersCache) {
+    const idx = xianniChaptersCache.findIndex(c => c.tingId === tingId);
+    if (idx !== -1) {
+      const chapter = xianniChaptersCache[idx];
+      const filename = formatFilename(idx + 1250, chapter.title);
+      const hostUrl = hostHost || process.env.BACKEND_URL || 'http://localhost:3001';
+      // 检查文件是否存在
+      const audioPath = path.join(__dirname, '../downloads/仙逆/audio', filename);
+      if (fs.existsSync(audioPath)) {
+         return `${hostUrl}/local-audio/仙逆/audio/${encodeURIComponent(filename)}`;
+      } else {
+         console.log(`[SERVER] Local audio NOT FOUND even though URL exists in JSON: ${audioPath}`);
+      }
+    }
+  }
+  return null;
+}
 
 app.get('/api/audio', async (req, res) => {
   const { url } = req.query; 
@@ -19,7 +66,21 @@ app.get('/api/audio', async (req, res) => {
 
     console.log(`\n[SERVER] -> Received GET /api/audio?url=${url}`);
   try {
-    if (!browser) {
+    // 优先返回本地文件 (仅针对已下载的《仙逆》1250章后内容测试)
+    let tingIdParam = null;
+    if (url.includes('/book/Ting/')) {
+       tingIdParam = url.split('/').pop();
+       // ---- 停用本地测试方案 ----
+       // const protocol = req.headers["x-forwarded-proto"] || req.protocol; const hostStr = protocol + "://" + req.get("host"); const localUrl = getLocalXianniAudio(tingIdParam, hostStr);
+       // if (localUrl) {
+       //   console.log(`[SERVER] -> Serving local audio for ${tingIdParam}: ${localUrl}`);
+       //   return res.json({ success: true, audio_url: localUrl, from_local: true });
+       // }
+       // ------------------------
+    }
+
+    // 确保 browser 是有效的
+    if (!browser || !browser.isConnected()) {
        browser = await chromium.launch({ headless: true });
     }
     
@@ -34,9 +95,20 @@ app.get('/api/audio', async (req, res) => {
     page.on('request', request => {
       const type = request.resourceType();
       const reqUrl = request.url();
-      if ((type === 'media' || reqUrl.match(/\.(m4a|mp3|m3u8)/i)) && !audioSrc) {
-        console.log(`[DEBUG] intercepted media request: ${reqUrl}`);
-        audioSrc = reqUrl;
+      
+      // 过滤常见广告域名
+      const isAd = reqUrl.includes('gvt1.com') || 
+                   reqUrl.includes('googlevideo.com') || 
+                   reqUrl.includes('doubleclick.net') ||
+                   reqUrl.includes('youtube.com');
+
+      if ((type === 'media' || reqUrl.match(/\.(m4a|mp3|m3u8)/i)) && !isAd) {
+        if (!audioSrc || audioSrc.includes('gvt1.com')) {
+          console.log(`[DEBUG] intercepted valid media request: ${reqUrl}`);
+          audioSrc = reqUrl;
+        }
+      } else if (isAd && (type === 'media' || reqUrl.match(/\.(m4a|mp3|m3u8)/i))) {
+        console.log(`[DEBUG] Skipped ad media request: ${reqUrl}`);
       }
     });
 
@@ -63,9 +135,20 @@ app.get('/api/audio', async (req, res) => {
             }, tingId);
             
             let waitAttempts = 0;
-            while (!audioSrc && waitAttempts < 25) {
+            while (!audioSrc && waitAttempts < 75) {  // 增加到15秒
                 await page.waitForTimeout(200);
                 waitAttempts++;
+            }
+            
+            // 如果还是没找到，再等一会儿
+            if (!audioSrc) {
+                console.log('[DEBUG] First wait timeout, extending...');
+                await page.waitForTimeout(3000);
+                waitAttempts = 0;
+                while (!audioSrc && waitAttempts < 25) {
+                    await page.waitForTimeout(200);
+                    waitAttempts++;
+                }
             }
         } catch(e) { 
             console.error('[SERVER] Iframe testFun failed:', e.message); 

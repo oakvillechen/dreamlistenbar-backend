@@ -8,6 +8,11 @@ primary_region = "yyz"
   PORT = "3001"
   NODE_ENV = "production"
 
+[vm]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
 [[services]]
   internal_port = 3001
   protocol = "tcp"

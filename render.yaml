@@ -1,12 +1,13 @@
 services:
   - type: web
     name: dreamlistenbar-backend
-    env: docker
+    env: node
     region: oregon
     plan: free
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    buildCommand: npm install && npm install -D playwright && npx playwright install chromium
+    startCommand: node server.js
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: PORT
-        value: 3001
-    healthCheckPath: /api/search
+        value: 10000
