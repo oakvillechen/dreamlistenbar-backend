@@ -4,10 +4,8 @@ services:
     env: node
     region: oregon
     plan: free
-    buildCommand: npm install && npm install -D playwright && npx playwright install chromium
+    buildCommand: npm install && npx playwright install chromium
     startCommand: node server.js
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 10000
