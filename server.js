@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import CryptoJS from 'crypto-js';
+import * as cheerio from 'cheerio';
 
 const app = express();
 app.use(cors());
@@ -531,14 +532,48 @@ app.get('/api/audio', async (req, res) => {
 });
 
 // ================== 分类/搜索 API ==================
+// 使用 HTML 爬取方式（悦听吧 API 不稳定）
 
 app.get('/api/category', async (req, res) => {
-  const { id = 'latest', page = '0' } = req.query;
+  const { id = 'latest', page = '1' } = req.query;
   
   try {
-    const url = `https://yuetingba.cn/api/book/list?category=${id}&page=${page}`;
-    const { data } = await axios.get(url, { timeout: 10000 });
-    res.json(data);
+    const url = id === 'latest'
+      ? `http://www.yuetingba.cn/top/latest/${page}`
+      : `http://www.yuetingba.cn/book/${id}/${page}`;
+    
+    const { data: html } = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(html);
+    const books = [];
+
+    $('.section-box-list-item').each((_, el) => {
+      const aNode = $(el).find('.box-list-item-text-title a');
+      const title = aNode.text().trim();
+      const href = aNode.attr('href');
+      const bookId = href ? href.split('/')[3] : '';
+      const cover = $(el).find('.box-list-item-img img').attr('src');
+      const summary = $(el).find('.box-list-item-text-intro').text().trim();
+      const authorText = $(el).find('span[title]').first().text().trim();
+      const speakerText = $(el).find('span[title]').last().text().trim();
+
+      if (title && bookId) {
+        books.push({
+          title,
+          bookId,
+          href: href || '',
+          cover: cover ? (cover.startsWith('http') ? cover : 'http://www.yuetingba.cn' + cover) : '',
+          author: authorText,
+          speaker: speakerText,
+          summary
+        });
+      }
+    });
+
+    res.json({ success: true, list: books });
   } catch (err) {
     console.error('[CATEGORY] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -553,9 +588,39 @@ app.get('/api/search', async (req, res) => {
   }
 
   try {
-    const url = `https://yuetingba.cn/api/book/search?keyword=${encodeURIComponent(keyword)}`;
-    const { data } = await axios.get(url, { timeout: 10000 });
-    res.json(data);
+    const url = `http://www.yuetingba.cn/Search?name=${encodeURIComponent(keyword)}`;
+    const { data: html } = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(html);
+    const books = [];
+
+    $('.section-box-list-item').each((_, el) => {
+      const aNode = $(el).find('.box-list-item-text-title a');
+      const title = aNode.text().trim();
+      const href = aNode.attr('href');
+      const bookId = href ? href.split('/')[3] : '';
+      const cover = $(el).find('.box-list-item-img img').attr('src');
+      const summary = $(el).find('.box-list-item-text-intro').text().trim();
+      const authorText = $(el).find('span[title]').first().text().trim();
+      const speakerText = $(el).find('span[title]').last().text().trim();
+
+      if (title && bookId) {
+        books.push({
+          title,
+          bookId,
+          href: href || '',
+          cover: cover ? (cover.startsWith('http') ? cover : 'http://www.yuetingba.cn' + cover) : '',
+          author: authorText,
+          speaker: speakerText,
+          summary
+        });
+      }
+    });
+
+    res.json({ success: true, list: books });
   } catch (err) {
     console.error('[SEARCH] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -567,17 +632,62 @@ app.get('/api/book/:id', async (req, res) => {
   const { page = '0' } = req.query;
 
   try {
-    const detailUrl = `https://yuetingba.cn/api/book/detail/${id}`;
-    const { data: detailData } = await axios.get(detailUrl, { timeout: 10000 });
+    // 获取书籍详情页
+    const detailUrl = `http://www.yuetingba.cn/book/detail/${id}/${page}`;
+    const { data: detailHtml } = await axios.get(detailUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      timeout: 10000
+    });
+
+    const $ = cheerio.load(detailHtml);
     
-    const chaptersUrl = `https://yuetingba.cn/api/book/chapters/${id}?page=${page}`;
-    const { data: chaptersData } = await axios.get(chaptersUrl, { timeout: 10000 });
+    // 解析书籍信息
+    const book = {
+      title: $('.book-detail-title').text().trim() || $('h1').first().text().trim(),
+      cover: $('.books-detail-img img').attr('src') || $('.ting-detail-img img').attr('src') || '',
+      author: $('.books-detail-detail').find('span:contains("作者")').next().text().trim() || 
+              $('.books-detail-detail').find('a[href*="/Search?"]').first().text().trim(),
+      speaker: $('.books-detail-detail').find('span:contains("主播")').next().text().trim() || 
+               $('.books-detail-detail').find('a[href*="/Search?"]').last().text().trim(),
+      summary: $('.books-detail-detail p').last().text().trim(),
+    };
+
+    // 处理封面 URL
+    if (book.cover && !book.cover.startsWith('http')) {
+      book.cover = 'http://www.yuetingba.cn' + book.cover;
+    }
+
+    // 解析章节列表
+    const chapters = [];
+    $('.ting-list-content-item').each((_, el) => {
+      const id = $(el).attr('id')?.replace('item_', '') || '';
+      const title = $(el).find('.col-md-10 a').attr('title') || 
+                    $(el).find('.col-md-10').text().trim();
+      if (id && title) {
+        chapters.push({
+          tingId: id,
+          title: title,
+          tingNo: chapters.length + 1,
+        });
+      }
+    });
+
+    // 解析分页
+    const tabs = [];
+    $('.nav-tabs li a').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const offset = href.split('/').pop();
+      tabs.push({
+        text: $(el).text().trim(),
+        offset: offset || '0',
+      });
+    });
 
     res.json({
       success: true,
-      book: detailData.data || {},
-      chapters: chaptersData.list || [],
-      tabs: chaptersData.tabs || [],
+      book,
+      chapters,
+      tabs,
     });
   } catch (err) {
     console.error('[BOOK] Error:', err.message);
