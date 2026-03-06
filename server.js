@@ -1,84 +1,208 @@
 import express from 'express';
 import cors from 'cors';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
 import { chromium } from 'playwright';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import axios from 'axios';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-// Serve local downloaded audio
-app.use('/local-audio', express.static(path.join(__dirname, '../downloads/')));
+// Supabase 配置
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://cwpxcqutrzzkuyaeweir.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_3pJBOBlAUHs53YrHBMNV5Q_fulqiYbv';
 
-// 我们使用单例 browser 提高响应速度
-let browser;
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-function formatFilename(index, title) {
-  const safeTitle = title.replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
-  return `${safeTitle}.mp3`;
+let browser = null;
+
+// 广告域名黑名单
+const AD_DOMAINS = [
+  'googlevideo.com',
+  'gvt1.com',
+  'doubleclick.net',
+  'youtube.com',
+  'youtu.be',
+];
+
+function isAdUrl(url) {
+  try {
+    const hostname = new URL(url).hostname;
+    return AD_DOMAINS.some(domain => hostname.includes(domain));
+  } catch {
+    return false;
+  }
 }
 
-// 缓存章节信息，提高查找速度
-let xianniChaptersCache = null;
+// ================== 用户数据 API ==================
 
-function getLocalXianniAudio(tingId, hostHost) {
-  if (!xianniChaptersCache) {
-    try {
-      const urlsFile = path.join(__dirname, '../downloads/仙逆/audio-urls-from-1250.json');
-      if (fs.existsSync(urlsFile)) {
-        xianniChaptersCache = JSON.parse(fs.readFileSync(urlsFile, 'utf-8'));
-      }
-    } catch (e) {
-      return null;
-    }
-  }
+// 获取用户数据
+app.get('/api/user/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { data, error } = await supabase
+      .from('user_data')
+      .select('history, favorites')
+      .eq('email', email)
+      .single();
 
-  if (xianniChaptersCache) {
-    const idx = xianniChaptersCache.findIndex(c => c.tingId === tingId);
-    if (idx !== -1) {
-      const chapter = xianniChaptersCache[idx];
-      const filename = formatFilename(idx + 1250, chapter.title);
-      const hostUrl = hostHost || process.env.BACKEND_URL || 'http://localhost:3001';
-      // 检查文件是否存在
-      const audioPath = path.join(__dirname, '../downloads/仙逆/audio', filename);
-      if (fs.existsSync(audioPath)) {
-         return `${hostUrl}/local-audio/仙逆/audio/${encodeURIComponent(filename)}`;
-      } else {
-         console.log(`[SERVER] Local audio NOT FOUND even though URL exists in JSON: ${audioPath}`);
-      }
+    if (error && error.code !== 'PGRST116') {
+      throw error;
     }
+
+    res.json({
+      success: true,
+      history: data?.history || [],
+      favorites: data?.favorites || [],
+    });
+  } catch (err) {
+    console.error('[USER] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
-  return null;
-}
+});
+
+// 保存用户数据
+app.post('/api/user/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { history, favorites } = req.body;
+
+    const { data, error } = await supabase
+      .from('user_data')
+      .upsert(
+        {
+          email,
+          history: history || [],
+          favorites: favorites || [],
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'email' }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('[USER] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 添加历史记录
+app.post('/api/user/:email/history', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const item = req.body;
+
+    // 获取现有数据
+    const { data: existing } = await supabase
+      .from('user_data')
+      .select('history')
+      .eq('email', email)
+      .single();
+
+    let history = existing?.history || [];
+    
+    // 移除同一条记录
+    history = history.filter(h => h.tingId !== item.tingId);
+    
+    // 添加到最前面，保留最近100条
+    history = [item, ...history].slice(0, 100);
+
+    // 更新
+    const { error } = await supabase
+      .from('user_data')
+      .upsert(
+        { email, history, updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[HISTORY] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 添加收藏
+app.post('/api/user/:email/favorites', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const item = req.body;
+
+    const { data: existing } = await supabase
+      .from('user_data')
+      .select('favorites')
+      .eq('email', email)
+      .single();
+
+    let favorites = existing?.favorites || [];
+    
+    if (!favorites.some(f => f.bookId === item.bookId)) {
+      favorites = [{ ...item, timestamp: Date.now() }, ...favorites];
+    }
+
+    const { error } = await supabase
+      .from('user_data')
+      .upsert(
+        { email, favorites, updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FAVORITES] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 删除收藏
+app.delete('/api/user/:email/favorites/:bookId', async (req, res) => {
+  try {
+    const { email, bookId } = req.params;
+
+    const { data: existing } = await supabase
+      .from('user_data')
+      .select('favorites')
+      .eq('email', email)
+      .single();
+
+    const favorites = (existing?.favorites || []).filter(f => f.bookId !== bookId);
+
+    const { error } = await supabase
+      .from('user_data')
+      .upsert(
+        { email, favorites, updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FAVORITES] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ================== 音频 API ==================
 
 app.get('/api/audio', async (req, res) => {
-  const { url } = req.query; 
-  
-  if (!url || typeof url !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid url parameter' });
+  const { url } = req.query;
+
+  if (!url) {
+    return res.status(400).json({ error: 'Missing url parameter' });
   }
 
-    console.log(`\n[SERVER] -> Received GET /api/audio?url=${url}`);
-  try {
-    // 优先返回本地文件 (仅针对已下载的《仙逆》1250章后内容测试)
-    let tingIdParam = null;
-    if (url.includes('/book/Ting/')) {
-       tingIdParam = url.split('/').pop();
-       // ---- 停用本地测试方案 ----
-       // const protocol = req.headers["x-forwarded-proto"] || req.protocol; const hostStr = protocol + "://" + req.get("host"); const localUrl = getLocalXianniAudio(tingIdParam, hostStr);
-       // if (localUrl) {
-       //   console.log(`[SERVER] -> Serving local audio for ${tingIdParam}: ${localUrl}`);
-       //   return res.json({ success: true, audio_url: localUrl, from_local: true });
-       // }
-       // ------------------------
-    }
+  console.log(`[SERVER] -> Received GET /api/audio?url=${url}`);
 
+  try {
     // 确保 browser 是有效的
     if (!browser || !browser.isConnected()) {
        browser = await chromium.launch({ headless: true });
@@ -86,185 +210,101 @@ app.get('/api/audio', async (req, res) => {
     
     const context = await browser.newContext();
     const page = await context.newPage();
+
     let audioSrc = null;
 
-    // 屏蔽阻止正常渲染的脚本和其他无用的广告脚本
-    await page.route('**/{disable-devtool,fundingchoicesmessages,pagead2,google,baidu}*', route => route.abort());
-
-    // 监听网络请求寻找媒体文件
-    page.on('request', request => {
-      const type = request.resourceType();
-      const reqUrl = request.url();
+    // 监听网络请求
+    page.on('response', async (response) => {
+      const responseUrl = response.url();
+      const contentType = response.headers()['content-type'] || '';
       
-      // 过滤常见广告域名
-      const isAd = reqUrl.includes('gvt1.com') || 
-                   reqUrl.includes('googlevideo.com') || 
-                   reqUrl.includes('doubleclick.net') ||
-                   reqUrl.includes('youtube.com');
-
-      if ((type === 'media' || reqUrl.match(/\.(m4a|mp3|m3u8)/i)) && !isAd) {
-        if (!audioSrc || audioSrc.includes('gvt1.com')) {
-          console.log(`[DEBUG] intercepted valid media request: ${reqUrl}`);
-          audioSrc = reqUrl;
+      // 检查是否是音频
+      if (contentType.includes('audio/') || contentType.includes('video/') || 
+          responseUrl.includes('.m4a') || responseUrl.includes('.mp3')) {
+        
+        if (isAdUrl(responseUrl)) {
+          console.log('[DEBUG] Skipped ad media request:', responseUrl.substring(0, 100));
+          return;
         }
-      } else if (isAd && (type === 'media' || reqUrl.match(/\.(m4a|mp3|m3u8)/i))) {
-        console.log(`[DEBUG] Skipped ad media request: ${reqUrl}`);
+        
+        console.log('[DEBUG] intercepted valid media request:', responseUrl.substring(0, 100));
+        audioSrc = responseUrl;
       }
     });
 
-    let targetUrl = url;
-    let tingId = null;
-    if (url.includes('/book/Ting/')) {
-       tingId = url.split('/').pop();
-       targetUrl = 'http://yuetingba.cn/book/detail/3a1c0235-9335-5f9b-b236-e3b92dda9baa/1'; // Player wrapper
+    // 访问页面
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+
+    // 执行测试函数
+    try {
+      await page.evaluate(() => {
+        if (typeof testFun === 'function') {
+          testFun();
+        }
+      });
+    } catch (e) {
+      console.log('[DEBUG] testFun not available');
     }
 
-    // 开始访问
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(e => console.error(e.message));
+    // 等待音频出现
+    let waitAttempts = 0;
+    while (!audioSrc && waitAttempts < 75) {
+      await page.waitForTimeout(200);
+      waitAttempts++;
+    }
     
-    if (tingId) {
-        try {
-            await page.waitForFunction(() => {
-                const iframe = document.getElementById("iframe_tingPlay");
-                return iframe && iframe.contentWindow && typeof iframe.contentWindow.testFun === 'function';
-            }, { timeout: 10000 });
-            
-            await page.evaluate((id) => {
-                const iframe = document.getElementById("iframe_tingPlay");
-                iframe.contentWindow.testFun(id);
-            }, tingId);
-            
-            let waitAttempts = 0;
-            while (!audioSrc && waitAttempts < 75) {  // 增加到15秒
-                await page.waitForTimeout(200);
-                waitAttempts++;
-            }
-            
-            // 如果还是没找到，再等一会儿
-            if (!audioSrc) {
-                console.log('[DEBUG] First wait timeout, extending...');
-                await page.waitForTimeout(3000);
-                waitAttempts = 0;
-                while (!audioSrc && waitAttempts < 25) {
-                    await page.waitForTimeout(200);
-                    waitAttempts++;
-                }
-            }
-        } catch(e) { 
-            console.error('[SERVER] Iframe testFun failed:', e.message); 
-        }
-    } else {
-        // 如果没有拦截到，也可能是详情页，点击第一章触发
-        if (!audioSrc) {
-           await page.waitForTimeout(2000);
-           const playBtn = await page.$('.ting-list-content-item-playicon');
-           if (playBtn) {
-               await playBtn.evaluate(b => b.click());
-               await page.waitForTimeout(3000); 
-           }
-        }
-    }
-
     if (!audioSrc) {
-       const innerSrc = await page.evaluate(() => {
-           let audioUrl = null;
-           // 直接在主页找
-           const a = document.querySelector('audio, source');
-           if (a && a.src) audioUrl = a.src;
-           
-           // 如果有 iframe (yuetingba 特色)
-           const iframe = document.querySelector('#iframe_tingPlay');
-           if (!audioUrl && iframe && iframe.contentDocument) {
-               const frameA = iframe.contentDocument.querySelector('audio, source');
-               if (frameA && frameA.src) audioUrl = frameA.src;
-           }
-           return audioUrl;
-       }).catch(() => null);
-       
-       if (innerSrc) {
-           audioSrc = innerSrc;
-       }
-    }
-
-    // 添加获取HTML保存下来，便于查看 playwright 到底看到了什么
-    if (!audioSrc) {
-       const htmlContent = await page.content();
-       try {
-           const fs = await import('fs');
-           fs.writeFileSync('/tmp/page_error.html', htmlContent);
-       } catch (err) {
-           console.error('Failed to write debug html:', err.message);
-       }
+      console.log('[DEBUG] First wait timeout, extending...');
+      await page.waitForTimeout(3000);
+      waitAttempts = 0;
+      while (!audioSrc && waitAttempts < 25) {
+        await page.waitForTimeout(200);
+        waitAttempts++;
+      }
     }
 
     await context.close();
 
     if (audioSrc) {
-      res.json({ success: true, audio_url: audioSrc });
+      console.log(`[SERVER] -> Found audio URL:`, audioSrc.substring(0, 100));
+      return res.json({ success: true, audio_url: audioSrc });
     } else {
-      res.status(404).json({ success: false, error: 'Could not extract audio url from the provided page within viewport.' });
+      return res.json({ success: false, error: 'Could not extract audio url from the provided page within viewport.' });
     }
   } catch (err) {
     console.error('Error fetching audio:', err);
-    res.status(500).json({ success: false, error: 'Failed to access source website.' });
+    return res.json({ success: false, error: 'Failed to access source website.' });
   }
 });
 
-app.get('/api/search', async (req, res) => {
-  const { keyword, type = '1' } = req.query; // 1: 书名, 2: 作者, 3: 主播
-  if (!keyword) return res.status(400).json({ error: 'Missing keyword parameter' });
+// ================== 分类/搜索 API ==================
+
+app.get('/api/category', async (req, res) => {
+  const { id = 'latest', page = '0' } = req.query;
+  
   try {
-    const url = `http://yuetingba.cn/Search?type=${type}&name=${encodeURIComponent(keyword)}`;
-    const { data: html } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const $ = cheerio.load(html);
-    const books = [];
-    $('.section-box-list-item').each((_, el) => {
-      const aNode = $(el).find('.box-list-item-text-title a');
-      const title = aNode.text().trim();
-      const href = aNode.attr('href'); // /book/detail/3a042a1a.../0
-      const bookId = href ? href.split('/')[3] : '';
-      const cover = $(el).find('.box-list-item-img img').attr('src');
-      const summary = $(el).find('.box-list-item-text-intro').text().trim();
-      
-      const authorText = $(el).find('span[title]').first().text().trim();
-      const speakerText = $(el).find('span[title]').last().text().trim();
-      
-      if (title && bookId) {
-        books.push({ title, bookId, href, cover: cover ? (cover.startsWith('http') ? cover : 'http://yuetingba.cn' + cover) : '', author: authorText, speaker: speakerText, summary });
-      }
-    });
-    res.json({ success: true, list: books });
+    const url = `https://yuetingba.cn/api/book/list?category=${id}&page=${page}`;
+    const { data } = await axios.get(url, { timeout: 10000 });
+    res.json(data);
   } catch (err) {
+    console.error('[CATEGORY] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.get('/api/category', async (req, res) => {
-  const { id = '1', page = '1' } = req.query;
+app.get('/api/search', async (req, res) => {
+  const { keyword } = req.query;
+  
+  if (!keyword) {
+    return res.status(400).json({ success: false, error: 'Missing keyword' });
+  }
+
   try {
-    const url = id === 'latest' 
-        ? `http://yuetingba.cn/top/latest/${page}` 
-        : `http://yuetingba.cn/book/${id}/${page}`;
-    const { data: html } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const $ = cheerio.load(html);
-    const books = [];
-    $('.section-box-list-item').each((_, el) => {
-      const aNode = $(el).find('.box-list-item-text-title a');
-      const title = aNode.text().trim();
-      const href = aNode.attr('href');
-      const bookId = href ? href.split('/')[3] : '';
-      const cover = $(el).find('.box-list-item-img img').attr('src');
-      const summary = $(el).find('.box-list-item-text-intro').text().trim();
-      
-      const authorText = $(el).find('span[title]').first().text().trim();
-      const speakerText = $(el).find('span[title]').last().text().trim();
-      
-      if (title && bookId) {
-        books.push({ title, bookId, href, cover: cover ? (cover.startsWith('http') ? cover : 'http://yuetingba.cn' + cover) : '', author: authorText, speaker: speakerText, summary });
-      }
-    });
-    res.json({ success: true, list: books });
+    const url = `https://yuetingba.cn/api/book/search?keyword=${encodeURIComponent(keyword)}`;
+    const { data } = await axios.get(url, { timeout: 10000 });
+    res.json(data);
   } catch (err) {
+    console.error('[SEARCH] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -272,42 +312,57 @@ app.get('/api/category', async (req, res) => {
 app.get('/api/book/:id', async (req, res) => {
   const { id } = req.params;
   const { page = '0' } = req.query;
+
   try {
-    const url = `http://yuetingba.cn/book/detail/${id}/${page}`;
-    const { data: html } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const $ = cheerio.load(html);
+    const detailUrl = `https://yuetingba.cn/api/book/detail/${id}`;
+    const { data: detailData } = await axios.get(detailUrl, { timeout: 10000 });
     
-    // Header Info
-    const bookTitle = $('.feature-box-detail h1').text().trim() || $('.box-detail-item-title').text().trim();
-    const cover = $('.book-info-img img, .box-detail-item-img img').attr('src');
-    
-    // Chapters
-    const chapters = [];
-    $('.ting-list-content-item').each((_, el) => {
-      const tId = $(el).attr('id')?.replace('item_', '');
-      const title = $(el).find('a[title]').first().text().trim() || $(el).find('a').last().text().trim();
-      if (tId && title) {
-        chapters.push({ tingId: tId, title, url: `http://yuetingba.cn/book/Ting/${tId}` });
-      }
-    });
-    
-    // Tabs (Pagination)
-    const tabs = [];
-    $('.nav-tabs li a').each((_, el) => {
-       const tabHref = $(el).attr('href');
-       const tabOffset = tabHref ? tabHref.split('/').pop() : '0';
-       const tabText = $(el).text().trim();
-       tabs.push({ offset: tabOffset, text: tabText });
-    });
-    
+    const chaptersUrl = `https://yuetingba.cn/api/book/chapters/${id}?page=${page}`;
+    const { data: chaptersData } = await axios.get(chaptersUrl, { timeout: 10000 });
+
     res.json({
-        success: true,
-        book: { title: bookTitle, cover: cover ? 'http://yuetingba.cn' + cover : '' },
-        chapters,
-        tabs
+      success: true,
+      book: detailData.data || {},
+      chapters: chaptersData.list || [],
+      tabs: chaptersData.tabs || [],
     });
   } catch (err) {
+    console.error('[BOOK] Error:', err.message);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 音频代理端点
+app.get('/api/proxy-audio', async (req, res) => {
+  const { url } = req.query;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'Missing url parameter' });
+  }
+
+  try {
+    console.log(`[PROXY] -> Proxying audio: ${url.substring(0, 100)}...`);
+    
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'stream',
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Referer': 'http://yuetingba.cn/'
+      }
+    });
+
+    res.setHeader('Content-Type', response.headers['content-type'] || 'audio/mpeg');
+    res.setHeader('Content-Length', response.headers['content-length'] || 0);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    
+    response.data.pipe(res);
+  } catch (err) {
+    console.error('[PROXY] Error:', err.message);
+    res.status(500).json({ error: 'Failed to proxy audio' });
   }
 });
 
