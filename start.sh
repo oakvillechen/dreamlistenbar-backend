@@ -9,6 +9,16 @@ cd "$(dirname "$0")"
 
 echo "🚀 启动 DreamListenBar 后台..."
 
+# 代理配置（可选）
+# 如果你有代理服务，取消下面的注释并设置代理地址
+# export PROXY_SERVER="http://127.0.0.1:7890"
+# export PROXY_SERVER="socks5://127.0.0.1:1080"
+
+# 检查代理配置
+if [ -n "$PROXY_SERVER" ]; then
+    echo "🌐 使用代理: $PROXY_SERVER"
+fi
+
 # 杀掉旧进程
 pkill -f "node server.js" 2>/dev/null || true
 pkill -f "ngrok http 3001" 2>/dev/null || true

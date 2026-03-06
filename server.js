@@ -14,6 +14,9 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIs
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// 代理配置（可选）
+const PROXY_SERVER = process.env.PROXY_SERVER || null; // 例如: http://127.0.0.1:7890
+
 let browser = null;
 
 // 广告域名黑名单
@@ -205,7 +208,15 @@ app.get('/api/audio', async (req, res) => {
   try {
     // 确保 browser 是有效的
     if (!browser || !browser.isConnected()) {
-       browser = await chromium.launch({ headless: true });
+      const launchOptions = { headless: true };
+      
+      // 如果配置了代理，添加代理选项
+      if (PROXY_SERVER) {
+        launchOptions.proxy = { server: PROXY_SERVER };
+        console.log(`[SERVER] Using proxy: ${PROXY_SERVER}`);
+      }
+      
+      browser = await chromium.launch(launchOptions);
     }
     
     const context = await browser.newContext();

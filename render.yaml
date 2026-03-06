@@ -9,3 +9,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # 可选：配置代理（如果有代理服务）
+      # - key: PROXY_SERVER
+      #   value: http://your-proxy-server:port
