@@ -3,6 +3,7 @@ import cors from 'cors';
 import { chromium } from 'playwright';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
+import CryptoJS from 'crypto-js';
 
 const app = express();
 app.use(cors());
@@ -195,6 +196,247 @@ app.delete('/api/user/:email/favorites/:bookId', async (req, res) => {
 });
 
 // ================== 音频 API ==================
+
+// ================== 悦听吧音频解密 API ==================
+// 解密密钥和IV (从悦听吧JS代码中提取)
+const YUETINGBA_KEY = CryptoJS.enc.Base64.parse('le95G3hnFDJsBE+1/v9eYw==');
+const YUETINGBA_IV = CryptoJS.enc.Base64.parse('IvswQFEUdKYf+d1wKpYLTg==');
+const YUETINGBA_DEFAULT_SERVER = 'http://oss.fileserver.yuetingba.cn:52001';
+
+// 解密 assl 字段获取音频服务器列表
+function decryptAssl(assl) {
+  try {
+    const decrypted = CryptoJS.AES.decrypt(assl, YUETINGBA_KEY, { 
+      iv: YUETINGBA_IV,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    });
+    
+    // 转成字符串
+    const hex = decrypted.toString();
+    let str = '';
+    for (let i = 0; i < hex.length; i += 2) {
+      str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+    }
+    
+    // 解析 JSON
+    const servers = JSON.parse(str);
+    return servers;
+  } catch (err) {
+    console.error('[DECRYPT ASSL] Error:', err.message);
+    return null;
+  }
+}
+
+// 根据 bookId 查找对应的音频服务器
+function findAudioServer(servers, bookId) {
+  if (!servers || !bookId) return null;
+  
+  // 提取 bookId 的短格式 (去掉横线后的最后12位)
+  const shortBookId = bookId.replace(/-/g, '').slice(-12);
+  
+  for (const server of servers) {
+    if (server.BookIds && server.BookIds.includes(shortBookId)) {
+      return {
+        url: `${server.Scheme}://${server.Value}:${server.Port}`,
+        name: server.Name,
+        type: server.AsType
+      };
+    }
+  }
+  
+  // 如果没找到，返回默认服务器
+  return null;
+}
+
+// 动态密钥派生函数 gk(tingId, creationTime)
+function deriveKey(tingId, creationTime) {
+  let result = '';
+  for (let i = 0; i < 20; i++) {
+    const charCode = tingId.charCodeAt(i) + Number(creationTime[i]);
+    result += String.fromCharCode(charCode);
+  }
+  for (let i = 20; i < tingId.length; i++) {
+    const charCode = tingId.charCodeAt(i) + Number(creationTime[i - 20]);
+    result += String.fromCharCode(charCode);
+  }
+  return result;
+}
+
+// 动态IV派生函数 gi(tingId, creationTime)
+function deriveIV(tingId, creationTime) {
+  let result = '';
+  for (let i = 20; i > 4; i--) {
+    const charCode = tingId.charCodeAt(i) + Number(creationTime[i - 1]);
+    result += String.fromCharCode(charCode);
+  }
+  return result;
+}
+
+// 解密efi字段获取音频路径 (使用动态密钥)
+function decryptEfiDynamic(efi, tingId, creationTime) {
+  try {
+    const processedTingId = tingId.replaceAll('-', '');
+    const processedTime = creationTime
+      .replaceAll('-', '')
+      .replaceAll(':', '')
+      .replaceAll('T', '')
+      .replaceAll('.', '')
+      .replaceAll(' ', '')
+      .padEnd(20, '0');
+    
+    const derivedKeyStr = deriveKey(processedTingId, processedTime);
+    const derivedIVStr = deriveIV(processedTingId, processedTime);
+    
+    const derivedKey = CryptoJS.enc.Base64.parse(btoa(derivedKeyStr));
+    const derivedIV = CryptoJS.enc.Base64.parse(btoa(derivedIVStr));
+    
+    const decrypted = CryptoJS.AES.decrypt(efi, derivedKey, { 
+      iv: derivedIV,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    });
+    
+    const path = decrypted.toString(CryptoJS.enc.Utf8);
+    return path;
+  } catch (err) {
+    console.error('[DECRYPT] Error:', err.message);
+    return null;
+  }
+}
+
+// 获取悦听吧音频URL (无需Playwright!)
+app.get('/api/yuetingba/audio/:tingId', async (req, res) => {
+  const { tingId } = req.params;
+  
+  try {
+    console.log(`[YUETINGBA] -> Fetching audio for tingId: ${tingId}`);
+    
+    // 1. 获取章节信息 (包含 efi)
+    const apiUrl = `http://www.yuetingba.cn/api/app/docs-listen/${tingId}/ting-with-efi`;
+    const { data } = await axios.get(apiUrl, { 
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept': 'application/json',
+      }
+    });
+    
+    if (!data || !data.efi) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'No efi field in response',
+        raw: data 
+      });
+    }
+    
+    // 2. 获取书籍详情页的 assl 字段 (音频服务器列表)
+    const bookDetailUrl = `http://www.yuetingba.cn/book/detail/${data.bookId}/0`;
+    const bookDetailResp = await axios.get(bookDetailUrl, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+      }
+    });
+    
+    // 提取 assl 字段
+    const asslMatch = bookDetailResp.data.match(/var assl = '([^']+)'/);
+    let audioServer = YUETINGBA_DEFAULT_SERVER;
+    
+    if (asslMatch && asslMatch[1]) {
+      const servers = decryptAssl(asslMatch[1]);
+      if (servers) {
+        const found = findAudioServer(servers, data.bookId);
+        if (found) {
+          audioServer = found.url;
+          console.log(`[YUETINGBA] -> Found audio server for book ${data.bookId}: ${audioServer}`);
+        }
+      }
+    }
+    
+    // 3. 解密 efi 获取音频路径
+    const audioPath = decryptEfiDynamic(data.efi, tingId, data.creationTime);
+    
+    if (!audioPath) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to decrypt efi field',
+        efi: data.efi,
+        tingId,
+        creationTime: data.creationTime
+      });
+    }
+    
+    // 4. 组合完整URL
+    const audioUrl = `${audioServer}${audioPath}`;
+    
+    console.log(`[YUETINGBA] -> Decrypted audio URL: ${audioUrl}`);
+    
+    res.json({
+      success: true,
+      tingId: data.id,
+      bookId: data.bookId,
+      title: data.title,
+      tingNo: data.tingNo,
+      audioPath,
+      audioUrl,
+      audioServer,
+      creationTime: data.creationTime,
+    });
+    
+  } catch (err) {
+    console.error('[YUETINGBA] Error:', err.message);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message,
+      tingId 
+    });
+  }
+});
+
+// 获取书籍章节列表
+app.get('/api/yuetingba/chapters/:bookId', async (req, res) => {
+  const { bookId } = req.params;
+  const { tingNo = 1 } = req.query;
+  
+  try {
+    console.log(`[YUETINGBA] -> Fetching chapters for bookId: ${bookId}`);
+    
+    const apiUrl = `http://www.yuetingba.cn/api/app/docs-listen/ting-list-with-efi/${bookId}?tingNo=${tingNo}`;
+    const { data } = await axios.get(apiUrl, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept': 'application/json',
+      }
+    });
+    
+    // API 直接返回数组
+    const chapters = Array.isArray(data) ? data : (data.list || []);
+    
+    res.json({
+      success: true,
+      bookId,
+      chapters: chapters.map(ch => ({
+        id: ch.id,
+        tingId: ch.id,
+        tingNo: ch.tingNo,
+        title: ch.title,
+        efi: ch.efi,
+        creationTime: ch.creationTime,
+      })),
+      total: chapters.length,
+    });
+    
+  } catch (err) {
+    console.error('[YUETINGBA] Error:', err.message);
+    res.status(500).json({ 
+      success: false, 
+      error: err.message,
+      bookId 
+    });
+  }
+});
 
 app.get('/api/audio', async (req, res) => {
   const { url } = req.query;
