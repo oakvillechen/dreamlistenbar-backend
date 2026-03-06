@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import { chromium } from 'playwright';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import CryptoJS from 'crypto-js';
@@ -15,29 +14,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://cwpxcqutrzzkuyaeweir.s
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN3cHhjcXV0cnp6a3V5YWV3ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3OTcwNTgsImV4cCI6MjA4ODM3MzA1OH0.PvpM1pEk_B1K5xueePctLlxhpwBm6GGaLhhttwF-334';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// 代理配置（可选）
-const PROXY_SERVER = process.env.PROXY_SERVER || null; // 例如: http://127.0.0.1:7890
-
-let browser = null;
-
-// 广告域名黑名单
-const AD_DOMAINS = [
-  'googlevideo.com',
-  'gvt1.com',
-  'doubleclick.net',
-  'youtube.com',
-  'youtu.be',
-];
-
-function isAdUrl(url) {
-  try {
-    const hostname = new URL(url).hostname;
-    return AD_DOMAINS.some(domain => hostname.includes(domain));
-  } catch {
-    return false;
-  }
-}
 
 // ================== 用户数据 API ==================
 
@@ -436,98 +412,6 @@ app.get('/api/yuetingba/chapters/:bookId', async (req, res) => {
       error: err.message,
       bookId 
     });
-  }
-});
-
-app.get('/api/audio', async (req, res) => {
-  const { url } = req.query;
-
-  if (!url) {
-    return res.status(400).json({ error: 'Missing url parameter' });
-  }
-
-  console.log(`[SERVER] -> Received GET /api/audio?url=${url}`);
-
-  try {
-    // 确保 browser 是有效的
-    if (!browser || !browser.isConnected()) {
-      const launchOptions = { headless: true };
-      
-      // 如果配置了代理，添加代理选项
-      if (PROXY_SERVER) {
-        launchOptions.proxy = { server: PROXY_SERVER };
-        console.log(`[SERVER] Using proxy: ${PROXY_SERVER}`);
-      }
-      
-      browser = await chromium.launch(launchOptions);
-    }
-    
-    const context = await browser.newContext();
-    const page = await context.newPage();
-
-    let audioSrc = null;
-
-    // 监听网络请求
-    page.on('response', async (response) => {
-      const responseUrl = response.url();
-      const contentType = response.headers()['content-type'] || '';
-      
-      // 检查是否是音频
-      if (contentType.includes('audio/') || contentType.includes('video/') || 
-          responseUrl.includes('.m4a') || responseUrl.includes('.mp3')) {
-        
-        if (isAdUrl(responseUrl)) {
-          console.log('[DEBUG] Skipped ad media request:', responseUrl.substring(0, 100));
-          return;
-        }
-        
-        console.log('[DEBUG] intercepted valid media request:', responseUrl.substring(0, 100));
-        audioSrc = responseUrl;
-      }
-    });
-
-    // 访问页面
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-
-    // 执行测试函数
-    try {
-      await page.evaluate(() => {
-        if (typeof testFun === 'function') {
-          testFun();
-        }
-      });
-    } catch (e) {
-      console.log('[DEBUG] testFun not available');
-    }
-
-    // 等待音频出现
-    let waitAttempts = 0;
-    while (!audioSrc && waitAttempts < 75) {
-      await page.waitForTimeout(200);
-      waitAttempts++;
-    }
-    
-    if (!audioSrc) {
-      console.log('[DEBUG] First wait timeout, extending...');
-      await page.waitForTimeout(3000);
-      waitAttempts = 0;
-      while (!audioSrc && waitAttempts < 25) {
-        await page.waitForTimeout(200);
-        waitAttempts++;
-      }
-    }
-
-    await context.close();
-
-    if (audioSrc) {
-      console.log(`[SERVER] -> Found audio URL:`, audioSrc.substring(0, 100));
-      return res.json({ success: true, audio_url: audioSrc });
-    } else {
-      return res.json({ success: false, error: 'Could not extract audio url from the provided page within viewport.' });
-    }
-  } catch (err) {
-    console.error('Error fetching audio:', err);
-    return res.json({ success: false, error: 'Failed to access source website.' });
   }
 });
 
