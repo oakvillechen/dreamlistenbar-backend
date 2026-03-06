@@ -536,11 +536,13 @@ app.get('/api/audio', async (req, res) => {
 
 app.get('/api/category', async (req, res) => {
   const { id = 'latest', page = '1' } = req.query;
+  // 悦听吧页码从1开始，如果前端传0则改为1
+  const pageNum = page === '0' || page === 0 ? '1' : page;
   
   try {
     const url = id === 'latest'
-      ? `http://www.yuetingba.cn/top/latest/${page}`
-      : `http://www.yuetingba.cn/book/${id}/${page}`;
+      ? `http://www.yuetingba.cn/top/latest/${pageNum}`
+      : `http://www.yuetingba.cn/book/${id}/${pageNum}`;
     
     const { data: html } = await axios.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
@@ -630,10 +632,11 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/book/:id', async (req, res) => {
   const { id } = req.params;
   const { page = '0' } = req.query;
+  const pageNum = page === '0' || page === 0 ? '0' : page; // 书籍详情页0是首页
 
   try {
     // 获取书籍详情页
-    const detailUrl = `http://www.yuetingba.cn/book/detail/${id}/${page}`;
+    const detailUrl = `http://www.yuetingba.cn/book/detail/${id}/${pageNum}`;
     const { data: detailHtml } = await axios.get(detailUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
       timeout: 10000
