@@ -10,7 +10,7 @@ app.use(express.json());
 
 // Supabase 配置
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://cwpxcqutrzzkuyaeweir.supabase.co';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_3pJBOBlAUHs53YrHBMNV5Q_fulqiYbv';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN3cHhjcXV0cnp6a3V5YWV3ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3OTcwNTgsImV4cCI6MjA4ODM3MzA1OH0.PvpM1pEk_B1K5xueePctLlxhpwBm6GGaLhhttwF-334';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
