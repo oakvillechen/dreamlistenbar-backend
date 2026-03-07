@@ -172,6 +172,70 @@ app.delete('/api/user/:email/favorites/:bookId', async (req, res) => {
   }
 });
 
+// 删除单条历史记录
+app.delete('/api/user/:email/history/:tingId', async (req, res) => {
+  try {
+    const { email, tingId } = req.params;
+
+    const { data: existing } = await supabase
+      .from('user_data')
+      .select('history')
+      .eq('email', email)
+      .single();
+
+    const history = (existing?.history || []).filter(h => h.tingId !== tingId);
+
+    const { error } = await supabase
+      .from('user_data')
+      .upsert(
+        { email, history, updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[HISTORY DELETE] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 清除所有历史记录
+app.delete('/api/user/:email/history', async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    const { error } = await supabase
+      .from('user_data')
+      .upsert(
+        { email, history: [], updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[HISTORY CLEAR] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+      .from('user_data')
+      .upsert(
+        { email, favorites, updated_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FAVORITES] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ================== 音频 API ==================
 
 // ================== 悦听吧音频解密 API ==================
