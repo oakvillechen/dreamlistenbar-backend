@@ -221,20 +221,6 @@ app.delete('/api/user/:email/history', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-      .from('user_data')
-      .upsert(
-        { email, favorites, updated_at: new Date().toISOString() },
-        { onConflict: 'email' }
-      );
-
-    if (error) throw error;
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[FAVORITES] Error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 // ================== 音频 API ==================
 
