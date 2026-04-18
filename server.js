@@ -1209,11 +1209,14 @@ app.get('/api/audio-playwright/:tingId', async (req, res) => {
  */
 app.all('/yuetingba_proxy/*', async (req, res) => {
   const targetPath = req.params[0] || '';
-  // 构造目标 URL，保留查询参数
   const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
   const targetUrl = `http://www.yuetingba.cn/${targetPath}${queryString}`;
   
   try {
+    const protocol = req.get('x-forwarded-proto') || req.protocol;
+    const host = req.get('host');
+    const proxyBase = `${protocol}://${host}/yuetingba_proxy/`;
+
     const response = await axios({
       method: req.method,
       url: targetUrl,
@@ -1225,15 +1228,30 @@ app.all('/yuetingba_proxy/*', async (req, res) => {
       data: req.body,
       responseType: 'arraybuffer',
       timeout: 15000,
-      validateStatus: false // 允许转发 404 等状态
+      validateStatus: false
     });
     
-    // 转发响应头
-    if (response.headers['content-type']) {
-      res.setHeader('Content-Type', response.headers['content-type']);
-    }
+    const contentType = response.headers['content-type'] || '';
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.status(response.status).send(response.data);
+    
+    let data = response.data;
+
+    // 递归重写：如果返回的是 HTML，则对其内容进行路径重写
+    if (contentType.includes('text/html')) {
+      let html = data.toString('utf-8');
+      
+      // A. 重写绝对路径 /... -> /yuetingba_proxy/...
+      html = html.replace(/(src|href)=["']\/([^"']+)["']/gi, `$1="${proxyBase}$2"`);
+      
+      // B. 重写所有 http:// 链接，强制走代理以避免 Mixed Content
+      // 覆盖 www.yuetingba.cn, yuetingba.cn 以及那个特定的脚本 IP
+      html = html.replace(/(src|href)=["']http:\/\/(www\.yuetingba\.cn|yuetingba\.cn|106\.13\.91\.31:43134)\/([^"']+)["']/gi, `$1="${proxyBase}$3"`);
+      
+      data = Buffer.from(html, 'utf-8');
+    }
+    
+    res.status(response.status).send(data);
   } catch (err) {
     console.error(`[REVERSE-PROXY] Error for ${targetUrl}:`, err.message);
     res.status(500).send(`Proxy Error: ${err.message}`);
@@ -1261,14 +1279,12 @@ app.get('/api/yuetingba/clean-player/:tingId', async (req, res) => {
     const host = req.get('host');
     const proxyBase = `${protocol}://${host}/yuetingba_proxy/`;
 
-    // 1. 核心改进：使用路径映射代理 (Reverse Proxy) 替换原本的 Query Proxy
-    // 这使得资源内部的相对路径能够基于 /yuetingba_proxy/ 正确解析
+    // 1. 核心改进：递归路径重写 (Global Regex)
+    // 重写所有以 / 开头的路径
+    html = html.replace(/(src|href)=["']\/([^"']+)["']/gi, `$1="${proxyBase}$2"`);
     
-    // 处理所有以 / 开头的路径，将其重写为我们的代理路径
-    html = html.replace(/(src|href)=["']\/([^"']+)["']/g, `$1="${proxyBase}$2"`);
-    
-    // 处理所有以 http://www.yuetingba.cn 开头的绝对路径
-    html = html.replace(/(src|href)=["']http:\/\/www\.yuetingba\.cn\/([^"']+)["']/g, `$1="${proxyBase}$2"`);
+    // 重写所有 http:// 链接，强制走代理
+    html = html.replace(/(src|href)=["']http:\/\/(www\.yuetingba\.cn|yuetingba\.cn|106\.13\.91\.31:43134)\/([^"']+)["']/gi, `$1="${proxyBase}$3"`);
 
     // 2. 注入 Ad-Finisher 脚本和强化后的净化样式
     const injection = `
