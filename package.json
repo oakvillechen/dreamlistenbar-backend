@@ -7,12 +7,13 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.98.0",
-    "axios": "^1.13.5",
-    "cheerio": "^1.2.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
     "dotenv": "^17.3.1",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "playwright": "^1.58.2"
   }
 }
